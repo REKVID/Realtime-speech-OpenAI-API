@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Голосовой чат OpenAI</title>
+    <title>хуйня</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -46,8 +46,9 @@
             border-radius: 5px;
             background: #e9ecef;
         }
-        .recording {
-            background: #dc3545 !important;
+        .error {
+            background: #ffe6e6;
+            color: #dc3545;
         }
         #transcript {
             margin-top: 20px;
@@ -71,6 +72,15 @@
             background: #f3e5f5;
             margin-right: 20%;
         }
+        #debug {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 5px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -82,20 +92,63 @@
         </div>
         <div id="status">Статус: Ожидание начала разговора</div>
         <div id="transcript"></div>
+        <div id="debug"></div>
     </div>
 
     <script>
+        // Проверка поддержки WebRTC
+        if (!window.RTCPeerConnection) {
+            window.RTCPeerConnection = window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
+        }
+
+        // Полифил для старых браузеров
+        if (navigator.mediaDevices === undefined) {
+            navigator.mediaDevices = {};
+        }
+
+        if (navigator.mediaDevices.getUserMedia === undefined) {
+            navigator.mediaDevices.getUserMedia = function(constraints) {
+                const getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+
+                if (!getUserMedia) {
+                    return Promise.reject(new Error('getUserMedia is not implemented in this browser'));
+                }
+
+                return new Promise(function(resolve, reject) {
+                    getUserMedia.call(navigator, constraints, resolve, reject);
+                });
+            }
+        }
+
         let pc = null;
         let audioStream = null;
         let isConnected = false;
+        const DEBUG = true;
 
         const startButton = document.getElementById('startButton');
         const stopButton = document.getElementById('stopButton');
         const status = document.getElementById('status');
         const transcript = document.getElementById('transcript');
+        const debug = document.getElementById('debug');
 
-        function updateStatus(message) {
+        if (DEBUG) {
+            debug.style.display = 'block';
+        }
+
+        function log(message, data = null) {
+            console.log(message, data);
+            if (DEBUG) {
+                debug.textContent += `\n${message}`;
+                if (data) {
+                    debug.textContent += `\n${JSON.stringify(data, null, 2)}`;
+                }
+            }
+        }
+
+        function updateStatus(message, isError = false) {
             status.textContent = `Статус: ${message}`;
+            status.className = isError ? 'error' : '';
+            log(message);
         }
 
         function addMessage(text, isUser = true) {
@@ -106,24 +159,80 @@
             transcript.scrollTop = transcript.scrollHeight;
         }
 
+        async function checkMediaSupport() {
+            try {
+                // Проверяем поддержку WebRTC
+                if (!window.RTCPeerConnection) {
+                    throw new Error('WebRTC не поддерживается в этом браузере');
+                }
+
+                // Проверяем поддержку getUserMedia
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error('getUserMedia не поддерживается в этом браузере');
+                }
+
+                // Проверяем HTTPS
+                if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
+                    throw new Error('WebRTC требует HTTPS соединения');
+                }
+
+                return true;
+            } catch (error) {
+                updateStatus(`Ошибка: ${error.message}`, true);
+                return false;
+            }
+        }
+
         async function initializeConnection() {
             try {
+                // Проверяем поддержку необходимых API
+                if (!await checkMediaSupport()) {
+                    return;
+                }
+
+                updateStatus('Получение эфемерного токена...');
+                
                 // Получаем эфемерный токен
-                const response = await fetch('/session');
+                const response = await fetch('/api/session');
                 const data = await response.json();
+                log('Получен ответ от сервера:', data);
+
+                if (!data || !data.client_secret || !data.client_secret.value) {
+                    throw new Error('Неверный формат ответа от сервера: отсутствует токен');
+                }
+
                 const token = data.client_secret.value;
+                updateStatus('Настройка WebRTC соединения...');
+
+                // Запрашиваем доступ к микрофону до создания RTCPeerConnection
+                try {
+                    audioStream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        }
+                    });
+                    updateStatus('Доступ к микрофону получен');
+                } catch (error) {
+                    throw new Error(`Ошибка доступа к микрофону: ${error.message}`);
+                }
 
                 // Создаем WebRTC подключение
-                pc = new RTCPeerConnection();
+                pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' }
+                    ]
+                });
 
-                // Настраиваем обработку аудио потока
-                audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                // Добавляем аудио поток
                 audioStream.getTracks().forEach(track => pc.addTrack(track, audioStream));
 
                 // Настраиваем канал данных
                 const dataChannel = pc.createDataChannel('oai-events');
                 dataChannel.onmessage = (e) => {
                     const event = JSON.parse(e.data);
+                    log('Получено сообщение:', event);
                     if (event.type === 'transcript') {
                         addMessage(event.text, true);
                     } else if (event.type === 'response') {
@@ -135,24 +244,29 @@
                 pc.ontrack = (event) => {
                     const audio = new Audio();
                     audio.srcObject = event.streams[0];
-                    audio.play();
+                    audio.play().catch(error => {
+                        log('Ошибка воспроизведения аудио:', error);
+                    });
                 };
 
                 // Создаем и отправляем SDP оффер
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
 
+                updateStatus('Установка соединения с OpenAI...');
                 const sdpResponse = await fetch(`https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17`, {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${token}`,
-                        'Content-Type': 'application/sdp'
+                        'Content-Type': 'application/sdp',
+                        'OpenAI-Beta': 'realtime=v1'
                     },
                     body: offer.sdp
                 });
 
                 if (!sdpResponse.ok) {
-                    throw new Error('Ошибка установки соединения');
+                    const errorData = await sdpResponse.json();
+                    throw new Error(`Ошибка установки соединения: ${JSON.stringify(errorData)}`);
                 }
 
                 const answer = {
@@ -167,7 +281,8 @@
                 updateStatus('Соединение установлено');
             } catch (error) {
                 console.error('Ошибка:', error);
-                updateStatus(`Ошибка: ${error.message}`);
+                updateStatus(`Ошибка: ${error.message}`, true);
+                stopConnection();
             }
         }
 
@@ -192,7 +307,7 @@
         // Обработка ошибок WebRTC
         window.onerror = function(msg, url, lineNo, columnNo, error) {
             console.error('Ошибка:', error);
-            updateStatus(`Произошла ошибка: ${msg}`);
+            updateStatus(`Произошла ошибка: ${msg}`, true);
             return false;
         };
     </script>
