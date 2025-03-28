@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Голосовой чат OpenAI</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 12px 24px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        #status {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 5px;
+            background: #e9ecef;
+        }
+        .recording {
+            background: #dc3545 !important;
+        }
+        #transcript {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 5px;
+            min-height: 100px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .message {
+            margin-bottom: 10px;
+            padding: 8px;
+            border-radius: 5px;
+        }
+        .user-message {
+            background: #e3f2fd;
+            margin-left: 20%;
+        }
+        .ai-message {
+            background: #f3e5f5;
+            margin-right: 20%;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Голосовой чат OpenAI</h1>
+        <div class="controls">
+            <button id="startButton">Начать разговор</button>
+            <button id="stopButton" disabled>Завершить разговор</button>
+        </div>
+        <div id="status">Статус: Ожидание начала разговора</div>
+        <div id="transcript"></div>
+    </div>
+
+    <script>
+        let pc = null;
+        let audioStream = null;
+        let isConnected = false;
+
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const status = document.getElementById('status');
+        const transcript = document.getElementById('transcript');
+
+        function updateStatus(message) {
+            status.textContent = `Статус: ${message}`;
+        }
+
+        function addMessage(text, isUser = true) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isUser ? 'user-message' : 'ai-message'}`;
+            messageDiv.textContent = text;
+            transcript.appendChild(messageDiv);
+            transcript.scrollTop = transcript.scrollHeight;
+        }
+
+        async function initializeConnection() {
+            try {
+                // Получаем эфемерный токен
+                const response = await fetch('/session');
+                const data = await response.json();
+                const token = data.client_secret.value;
+
+                // Создаем WebRTC подключение
+                pc = new RTCPeerConnection();
+
+                // Настраиваем обработку аудио потока
+                audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioStream.getTracks().forEach(track => pc.addTrack(track, audioStream));
+
+                // Настраиваем канал данных
+                const dataChannel = pc.createDataChannel('oai-events');
+                dataChannel.onmessage = (e) => {
+                    const event = JSON.parse(e.data);
+                    if (event.type === 'transcript') {
+                        addMessage(event.text, true);
+                    } else if (event.type === 'response') {
+                        addMessage(event.text, false);
+                    }
+                };
+
+                // Настраиваем воспроизведение аудио от модели
+                pc.ontrack = (event) => {
+                    const audio = new Audio();
+                    audio.srcObject = event.streams[0];
+                    audio.play();
+                };
+
+                // Создаем и отправляем SDP оффер
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                const sdpResponse = await fetch(`https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/sdp'
+                    },
+                    body: offer.sdp
+                });
+
+                if (!sdpResponse.ok) {
+                    throw new Error('Ошибка установки соединения');
+                }
+
+                const answer = {
+                    type: 'answer',
+                    sdp: await sdpResponse.text()
+                };
+                await pc.setRemoteDescription(answer);
+
+                isConnected = true;
+                startButton.disabled = true;
+                stopButton.disabled = false;
+                updateStatus('Соединение установлено');
+            } catch (error) {
+                console.error('Ошибка:', error);
+                updateStatus(`Ошибка: ${error.message}`);
+            }
+        }
+
+        function stopConnection() {
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            if (audioStream) {
+                audioStream.getTracks().forEach(track => track.stop());
+                audioStream = null;
+            }
+            isConnected = false;
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            updateStatus('Разговор завершен');
+        }
+
+        startButton.addEventListener('click', initializeConnection);
+        stopButton.addEventListener('click', stopConnection);
+
+        // Обработка ошибок WebRTC
+        window.onerror = function(msg, url, lineNo, columnNo, error) {
+            console.error('Ошибка:', error);
+            updateStatus(`Произошла ошибка: ${msg}`);
+            return false;
+        };
+    </script>
+</body>
+</html> 
