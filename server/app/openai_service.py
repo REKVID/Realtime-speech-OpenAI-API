@@ -1,43 +1,30 @@
-import os
 import httpx
 from fastapi import HTTPException
-from app.utils.logger import logger
-
-"""
-Модуль для взаимодействия с OpenAI API.
-
-Этот модуль содержит функции для создания и управления сессиями OpenAI.
-"""
+from app.logger import logger
+from app.config import settings, read_instructions
 
 
 async def create_openai_session():
-    """
-    Создает новую сессию с OpenAI API.
-
-    Returns:
-        dict: Данные ответа от OpenAI API, включая токен сессии
-
-    Raises:
-        HTTPException: Если произошла ошибка при создании сессии или отсутствует API ключ
-    """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
+    if not settings.api_key:
         logger.error("API key not found in environment variables")
         raise HTTPException(status_code=500, detail={"error": "API key not configured"})
 
+    instructions = read_instructions()
+    if instructions != "":
+        logger.info("Loaded instructions from file")
+
     async with httpx.AsyncClient() as client:
         request_data = {
-            "model": "gpt-4o-realtime-preview-2024-12-17",
-            "voice": "verse",
-            "instructions": "You are a helpful AI assistant. Always respond in Russian language. Use a natural, conversational Russian speaking style.",
+            "model": settings.model,
+            "voice": settings.voice,
+            "temperature": settings.temperature,
+            "instructions": instructions,
         }
-
-        logger.info(f"Sending request to OpenAI with data: {request_data}")
 
         response = await client.post(
             "https://api.openai.com/v1/realtime/sessions",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {settings.api_key}",
                 "Content-Type": "application/json",
                 "OpenAI-Beta": "realtime=v1",
             },
@@ -45,10 +32,12 @@ async def create_openai_session():
         )
 
         response_data = response.json()
-        logger.info(f"Response from OpenAI: {response_data}")
+        logger.info("Successfully created OpenAI session")
 
         if response.status_code != 200:
-            logger.error(f"Error from OpenAI: {response_data}")
-            raise HTTPException(status_code=response.status_code, detail=response_data)
+            logger.error("Error from OpenAI API")
+            raise HTTPException(
+                status_code=response.status_code, detail={"error": "OpenAI API error"}
+            )
 
         return response_data
